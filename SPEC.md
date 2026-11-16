@@ -127,11 +127,13 @@ Decoding, `eardrum/decode.py`:
 `train.py`:
 
 - Seed `random`, `numpy`, `torch`; `torch.set_num_threads` from env if needed.
-- Both models: 25 epochs max, batch 16, AdamW(lr=1e-3, weight_decay=1e-4), CosineAnnealingLR, early stopping patience 8 on validation note F1, restore best.
+- Both models: 60 epochs max, batch 16, AdamW(lr=1e-3, weight_decay=1e-4), CosineAnnealingLR, early stopping patience 12, restore best.
+- **Epoch budget (measured).** The original 25 epochs is only ~175 optimizer steps on 103 chunks; validation note F1 stayed at 0. 60 epochs (~420 steps) reaches ~0.45. Do not shorten this without re-measuring.
+- **Thresholds are validation-tuned.** Frame rate is ~2% active, so a fixed frame threshold of 0.40 suppresses every note and reports F1 = 0. During training, the checkpoint criterion is the best validation note F1 over onset thresholds 0.15–0.40 at frame threshold 0.15, which prevents a zero metric from triggering a premature stop. After training, the operating point is chosen on the validation split over onset 0.15–0.40 × frame 0.10–0.30 maximizing onset+offset F1, then stored in the checkpoint `config` and used by `evaluate.py` and `app.py`. The test split is never used for tuning.
 - Loss:
   - dual: `BCEWithLogitsLoss(pos_weight=4.0)(frame) + 1.5 * BCEWithLogitsLoss(pos_weight=8.0)(onset)`
   - baseline: frame term only.
-- Validation each epoch: full-track chunked inference on the 2 validation tracks, `mir_eval` note F1 (no offset) averaged. Checkpoint on that. This avoids the undefined "val" from the original spec.
+- Validation each epoch: full-track chunked inference on the 2 validation tracks, `mir_eval` note F1 (no offset) at the best swept onset threshold. Checkpoint on that. This avoids the undefined "val" from the original spec.
 - Log to W&B: `train/loss`, `train/onset_loss`, `train/frame_loss`, `val/loss`, `val/frame_f1`, `val/onset_f1`, `val/note_f1`, `lr`; `wandb.Image` every 5 epochs with mel, GT, and predicted rolls for the model being trained.
 - W&B mode: `online` only if `WANDB_API_KEY` is set, otherwise `offline`; `WANDB_MODE` overrides. Import failure disables logging without failing training.
 - Save `outputs/baseline_best.pt`, `outputs/dual_best.pt`, and `outputs/history_*.json`.
@@ -154,7 +156,7 @@ Decoding, `eardrum/decode.py`:
 `app.py` (Gradio Blocks) and `demo.ipynb`:
 
 - Load `outputs/metrics.json` for a header; if missing, show "metrics not generated".
-- Inputs: audio upload/mic (`type="filepath"`), examples from `outputs/demo_samples/`, onset slider 0.1–0.9 (0.45), frame slider 0.1–0.9 (0.40).
+- Inputs: audio upload/mic (`type="filepath"`), examples from `outputs/demo_samples/`, onset slider 0.1–0.9 and frame slider 0.1–0.9, both defaulting to the validation-tuned values stored in the checkpoint (the spec's 0.45/0.40 defaults are unreachable for this model).
 - Outputs: high-res plot (mel + 88-key piano roll, first 30 s if longer), audio playback, `.mid` download, note count and mean duration.
 - Audio playback: `midi.synthesize(fs=16000)` (dependency-free sine synth), converted to `int16` in `[-32768, 32767]` before passing to Gradio. Do not require fluidsynth. If `fluidsynth` is available, it may be used behind a flag.
 - Guard no-note output (`synthesize` returns an empty array) and missing checkpoint with a clear error.
@@ -241,7 +243,7 @@ Fresh clone: `uv sync` + `uv run pytest` must pass without data; `outputs/` chec
 |---|---|
 | 1 (half day) | Downloader, cache, target builder, mel, contract tests |
 | 2 (half day) | Models, decode, training loop, 1-epoch smoke run |
-| 3 (half day) | Full 25-epoch runs, evaluation, figures, metrics.json |
+| 3 (half day) | Full 60-epoch runs, evaluation, figures, metrics.json |
 | 4 (half day) | Gradio app, notebook, README/licensing, cleanup |
 
 ## Out of scope

@@ -239,7 +239,7 @@ def write_demo_excerpts(data_dir: Path, output_dir: Path) -> None:
     lines = [
         "# Demo excerpts",
         "",
-        f"20-second excerpts of two MAESTRO v3.0.0 test tracks ({DEMO_SECONDS} s),",
+        f"{DEMO_SECONDS}-second excerpts of two MAESTRO v3.0.0 test tracks,",
         "16 kHz mono WAV.",
         "",
         "Source: MAESTRO v3.0.0, Magenta / Google.",

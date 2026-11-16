@@ -12,6 +12,8 @@ from eardrum import constants as C
 from eardrum.dataset import load_audio, mel_spectrogram
 from eardrum.model import build_model
 
+INFERENCE_BATCH = 8
+
 
 def predict_probabilities(
     model: torch.nn.Module, audio: np.ndarray, device: str = "cpu"
@@ -29,6 +31,14 @@ def predict_probabilities(
     last_start = max(total_frames - C.N_FRAMES, 0)
     starts = list(range(0, last_start, C.CHUNK_HOP_FRAMES)) + [last_start]
 
+    windows = []
+    for start_frame in starts:
+        start_sample = start_frame * C.HOP_LENGTH
+        window = audio[start_sample : start_sample + C.N_SAMPLES]
+        if len(window) < C.N_SAMPLES:
+            window = np.pad(window, (0, C.N_SAMPLES - len(window)))
+        windows.append(mel_spectrogram(window))
+
     frame_sum = np.zeros((C.N_PITCHES, total_frames), dtype=np.float64)
     onset_sum = np.zeros_like(frame_sum)
     counts = np.zeros(total_frames, dtype=np.float64)
@@ -36,28 +46,24 @@ def predict_probabilities(
 
     model.eval()
     with torch.no_grad():
-        for start_frame in starts:
-            start_sample = start_frame * C.HOP_LENGTH
-            window = audio[start_sample : start_sample + C.N_SAMPLES]
-            if len(window) < C.N_SAMPLES:
-                window = np.pad(window, (0, C.N_SAMPLES - len(window)))
-            mel = torch.from_numpy(mel_spectrogram(window))[None, None]
-            outputs = model(mel.to(device))
-            frame = torch.sigmoid(outputs["frame"])[0].cpu().numpy()
+        for i in range(0, len(windows), INFERENCE_BATCH):
+            batch = torch.from_numpy(np.stack(windows[i : i + INFERENCE_BATCH]))
+            outputs = model(batch[:, None].to(device))
+            frame = torch.sigmoid(outputs["frame"]).cpu().numpy()
             onset = (
-                torch.sigmoid(outputs["onset"])[0].cpu().numpy()
+                torch.sigmoid(outputs["onset"]).cpu().numpy()
                 if "onset" in outputs
                 else None
             )
             if onset is not None:
                 has_onset = True
-
-            valid = min(C.N_FRAMES, total_frames - start_frame)
-            sl = slice(start_frame, start_frame + valid)
-            frame_sum[:, sl] += frame[:, :valid]
-            if onset is not None:
-                onset_sum[:, sl] += onset[:, :valid]
-            counts[sl] += 1
+            for j, start_frame in enumerate(starts[i : i + INFERENCE_BATCH]):
+                valid = min(C.N_FRAMES, total_frames - start_frame)
+                sl = slice(start_frame, start_frame + valid)
+                frame_sum[:, sl] += frame[j, :, :valid]
+                if onset is not None:
+                    onset_sum[:, sl] += onset[j, :, :valid]
+                counts[sl] += 1
 
     counts = np.maximum(counts, 1.0)
     frame_probs = (frame_sum / counts).astype(np.float32)

@@ -69,6 +69,21 @@ uv run python app.py --checkpoint outputs/dual_best.pt
 Then open `http://127.0.0.1:7860` and pick an example from
 `outputs/demo_samples/`. `demo.ipynb` covers the same path in a notebook.
 
+## Results (held-out test split)
+
+Two test tracks, `mir_eval.transcription` at a 50 ms onset tolerance and
+`offset_ratio=0.2`, with thresholds tuned on the validation split:
+
+| Model | Frame F1 | Note onset F1 | Note onset+offset F1 |
+|---|---:|---:|---:|
+| Baseline CRNN | 0.495 | 0.812 | 0.341 |
+| Onsets & Frames | 0.444 | 0.829 | 0.389 |
+
+The dual head improves note-level onset and onset+offset scores; the baseline
+edges it out on dense frame F1. With only two test tracks the noise is large, so
+this is a scaled-down ablation, not evidence about the architecture in general.
+`outputs/metrics.json` holds the per-track numbers and the full threshold sweep.
+
 ## Tests
 
 ```bash

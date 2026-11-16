@@ -143,7 +143,11 @@ def transcribe(audio_path, onset_thresh, frame_thresh):
     return figure, playback, midi_path, summary
 
 
-def build_demo(checkpoint: Path, metrics_path: Path):
+def build_demo(
+    metrics_path: Path,
+    onset_default: float = 0.45,
+    frame_default: float = 0.40,
+):
     import gradio as gr
 
     examples = sorted(str(path) for path in Path("outputs/demo_samples").glob("*.wav"))
@@ -157,10 +161,18 @@ def build_demo(checkpoint: Path, metrics_path: Path):
                     label="Piano audio",
                 )
                 onset = gr.Slider(
-                    0.1, 0.9, value=0.45, step=0.05, label="Onset sensitivity threshold"
+                    0.1,
+                    0.9,
+                    value=onset_default,
+                    step=0.05,
+                    label="Onset sensitivity threshold",
                 )
                 frame = gr.Slider(
-                    0.1, 0.9, value=0.40, step=0.05, label="Frame sustain threshold"
+                    0.1,
+                    0.9,
+                    value=frame_default,
+                    step=0.05,
+                    label="Frame sustain threshold",
                 )
                 button = gr.Button("Transcribe", variant="primary")
             with gr.Column():
@@ -193,9 +205,13 @@ def main(argv: list[str] | None = None) -> None:
             f"checkpoint not found: {checkpoint}. Run train.py first or pass --checkpoint."
         )
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    MODEL, _ = load_model(checkpoint, DEVICE)
+    MODEL, config = load_model(checkpoint, DEVICE)
 
-    demo = build_demo(checkpoint, Path(args.metrics))
+    demo = build_demo(
+        Path(args.metrics),
+        onset_default=float(config.get("onset_thresh", 0.45)),
+        frame_default=float(config.get("frame_thresh", 0.40)),
+    )
     demo.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"),
         server_port=args.port,

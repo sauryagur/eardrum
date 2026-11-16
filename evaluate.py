@@ -33,13 +33,15 @@ ONSET_THRESH = 0.45
 THRESHOLDS = np.round(np.arange(0.20, 0.801, 0.05), 2)
 
 
-def frame_metrics(model, dataset: MaestroChunks, device: str) -> dict[str, float]:
+def frame_metrics(
+    model, dataset: MaestroChunks, device: str, frame_thresh: float
+) -> dict[str, float]:
     loader = DataLoader(dataset, batch_size=16, shuffle=False)
     tp = fp = fn = 0
     with torch.no_grad():
         for mel, frame, _ in loader:
             outputs = model(mel.unsqueeze(1).to(device))
-            pred = (torch.sigmoid(outputs["frame"]) >= FRAME_THRESH).cpu().numpy()
+            pred = (torch.sigmoid(outputs["frame"]) >= frame_thresh).cpu().numpy()
             a, b, c = frame_counts(pred, frame.numpy())
             tp, fp, fn = tp + a, fp + b, fn + c
     return prf(tp, fp, fn)
@@ -47,10 +49,12 @@ def frame_metrics(model, dataset: MaestroChunks, device: str) -> dict[str, float
 
 def evaluate_model(checkpoint: Path, data_dir: Path, device: str) -> dict:
     model, config = load_model(checkpoint, device)
+    onset_thresh = float(config.get("onset_thresh", ONSET_THRESH))
+    frame_thresh = float(config.get("frame_thresh", FRAME_THRESH))
     dataset = MaestroChunks(data_dir, "test")
     tracks = split_tracks(data_dir, "test")
 
-    frame = frame_metrics(model, dataset, device)
+    frame = frame_metrics(model, dataset, device, frame_thresh)
 
     per_track = {}
     sweep_points = []
@@ -60,21 +64,21 @@ def evaluate_model(checkpoint: Path, data_dir: Path, device: str) -> dict:
         probs = predict_probabilities(model, audio, device=device)
         cached[track["audio"].name] = (probs, track["notes"], len(audio) / C.SAMPLE_RATE)
 
-    def decode_at(onset_thresh: float) -> list[tuple]:
+    def decode_at(threshold: float) -> list[tuple]:
         rows = []
         for probs, notes, duration in cached.values():
             estimated = decode_notes(
                 probs["frame"],
                 probs["onset"],
-                onset_thresh=onset_thresh,
-                frame_thresh=FRAME_THRESH,
+                onset_thresh=threshold,
+                frame_thresh=frame_thresh,
             )
             rows.append(
                 (notes, [(p, s, e) for p, s, e, _ in estimated], duration)
             )
         return rows
 
-    default_rows = decode_at(ONSET_THRESH)
+    default_rows = decode_at(onset_thresh)
     micro = micro_note_scores(default_rows)
 
     per_track = {}
@@ -105,8 +109,8 @@ def evaluate_model(checkpoint: Path, data_dir: Path, device: str) -> dict:
         "note": micro,
         "per_track": per_track,
         "threshold_sweep": sweep_points,
-        "frame_thresh": FRAME_THRESH,
-        "onset_thresh": ONSET_THRESH,
+        "frame_thresh": frame_thresh,
+        "onset_thresh": onset_thresh,
     }
 
 
@@ -159,10 +163,11 @@ def plot_qualitative(
         (axes[2], "baseline", "Baseline CRNN"),
         (axes[3], "dual", "Onsets & Frames"),
     ):
-        model, _ = load_model(results[name]["checkpoint"], device)
+        model, config = load_model(results[name]["checkpoint"], device)
         with torch.no_grad():
             outputs = model(mel[None, None].to(device))
-        pred = (torch.sigmoid(outputs["frame"])[0] >= FRAME_THRESH).cpu().numpy()
+        threshold = config.get("frame_thresh", FRAME_THRESH)
+        pred = (torch.sigmoid(outputs["frame"])[0] >= threshold).cpu().numpy()
         axis.imshow(pred, aspect="auto", origin="lower", cmap="gray_r")
         axis.set_ylabel("MIDI")
         axis.set_title(title)

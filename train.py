@@ -24,13 +24,13 @@ from eardrum.metrics import frame_counts, micro_note_scores, prf  # noqa: E402
 from eardrum.model import build_model, count_parameters  # noqa: E402
 
 WANDB_PROJECT = "audio-to-midi-transcription"
-DEFAULT_EPOCHS = 25
+DEFAULT_EPOCHS = 60
 BATCH_SIZE = 16
 LR = 1e-3
 WEIGHT_DECAY = 1e-4
-PATIENCE = 8
-FRAME_THRESH = 0.40
-ONSET_THRESH = 0.45
+PATIENCE = 12
+FRAME_THRESH = 0.15
+ONSET_THRESH = 0.25
 FRAME_POS_WEIGHT = 4.0
 ONSET_POS_WEIGHT = 8.0
 ONSET_LOSS_WEIGHT = 1.5
@@ -79,32 +79,86 @@ def cached_metrics(model, loader, device) -> dict[str, float]:
                 tp, fp, fn = frame_counts(opred, onset.numpy())
                 onset_tp, onset_fp, onset_fn = onset_tp + tp, onset_fp + fp, onset_fn + fn
     result = {"frame_f1": prf(frame_tp, frame_fp, frame_fn)["f1"]}
-    result["onset_f1"] = prf(onset_tp, onset_fp, onset_fn)["f1"] if has_onset else None
+    result["onset_head_f1"] = (
+        prf(onset_tp, onset_fp, onset_fn)["f1"] if has_onset else None
+    )
     return result
+
+
+TONSET_SWEEP = (0.15, 0.20, 0.25, 0.30, 0.35, 0.40)
+TFRAME_SWEEP = (0.10, 0.15, 0.20, 0.25, 0.30)
+
+
+def _track_probabilities(model, tracks, device) -> list[tuple]:
+    cached = []
+    for track in tracks:
+        audio = load_audio(track["audio"])
+        probs = predict_probabilities(model, audio, device=device)
+        cached.append((probs, track["notes"], len(audio) / C.SAMPLE_RATE))
+    return cached
+
+
+def _decode_rows(cached, onset_thresh: float, frame_thresh: float) -> list[tuple]:
+    rows = []
+    for probs, notes, duration in cached:
+        estimated = decode_notes(
+            probs["frame"],
+            probs["onset"],
+            onset_thresh=onset_thresh,
+            frame_thresh=frame_thresh,
+        )
+        rows.append((notes, [(p, s, e) for p, s, e, _ in estimated], duration))
+    return rows
 
 
 def validation_metrics(model, val_loader, val_tracks, device) -> dict[str, float]:
     metrics = cached_metrics(model, val_loader, device)
+    cached = _track_probabilities(model, val_tracks, device)
+    metrics.update(micro_note_scores(_decode_rows(cached, ONSET_THRESH, FRAME_THRESH)))
 
-    per_track = []
-    for track in val_tracks:
-        audio = load_audio(track["audio"])
-        probs = predict_probabilities(model, audio, device=device)
-        estimated = decode_notes(probs["frame"], probs["onset"])
-        per_track.append(
-            (
-                track["notes"],
-                [(p, s, e) for p, s, e, _ in estimated],
-                len(audio) / C.SAMPLE_RATE,
-            )
-        )
-    metrics.update(micro_note_scores(per_track))
+    # Fixed thresholds can report 0 for many epochs and trigger a premature
+    # stop, so the checkpoint criterion is the best onset threshold on the
+    # validation split. The final operating point is tuned after training.
+    best_score, best_onset = -1.0, ONSET_THRESH
+    for onset_thresh in TONSET_SWEEP:
+        score = micro_note_scores(_decode_rows(cached, onset_thresh, FRAME_THRESH))[
+            "note_f1"
+        ]
+        if score > best_score:
+            best_score, best_onset = score, onset_thresh
+    metrics["tuned_note_f1"] = best_score
+    metrics["best_onset_thresh"] = best_onset
     return metrics
+
+
+def tune_thresholds(checkpoint_path: Path, val_tracks, device) -> tuple[float, float, float]:
+    """Pick the validation operating point and store it in the checkpoint."""
+    from eardrum.decode import load_model
+
+    model, _ = load_model(checkpoint_path, device)
+    cached = _track_probabilities(model, val_tracks, device)
+    best = (-1.0, ONSET_THRESH, FRAME_THRESH)
+    for onset_thresh in TONSET_SWEEP:
+        for frame_thresh in TFRAME_SWEEP:
+            scores = micro_note_scores(
+                _decode_rows(cached, onset_thresh, frame_thresh)
+            )
+            if scores["note_f1_offset"] > best[0]:
+                best = (scores["note_f1_offset"], onset_thresh, frame_thresh)
+
+    checkpoint = torch.load(str(checkpoint_path), map_location=device)
+    config = dict(checkpoint.get("config", {}))
+    config.update(
+        {"onset_thresh": best[1], "frame_thresh": best[2], "val_note_f1_offset": best[0]}
+    )
+    checkpoint["config"] = config
+    torch.save(checkpoint, checkpoint_path)
+    return best[1], best[2], best[0]
 
 
 def roll_image(sample, model, device, title: str):
     """Mel + ground truth + prediction for one validation chunk."""
-    mel, frame, onset = sample
+    mel, frame, _ = sample
     model.eval()
     with torch.no_grad():
         outputs = model(mel[None, None].to(device))
@@ -203,10 +257,11 @@ def train_model(
             "lr": optimizer.param_groups[0]["lr"],
         }
         history.append(record)
-        note_f1 = metrics["note_f1"]
+        note_f1 = metrics["tuned_note_f1"]
         print(
             f"[{name}] {epoch:02d} loss={record['train_loss']:.4f} "
-            f"frame_f1={metrics['frame_f1']:.3f} note_f1={note_f1:.3f}"
+            f"frame_f1={metrics['frame_f1']:.3f} note_f1={note_f1:.3f} "
+            f"(onset_thresh={metrics['best_onset_thresh']:.2f})"
         )
 
         if run is not None:
@@ -217,11 +272,13 @@ def train_model(
                     "train/onset_loss": record["train_onset_loss"],
                     "val/frame_f1": metrics["frame_f1"],
                     **(
-                        {"val/onset_f1": metrics["onset_f1"]}
-                        if metrics["onset_f1"] is not None
+                        {"val/onset_f1": metrics["onset_head_f1"]}
+                        if metrics["onset_head_f1"] is not None
                         else {}
                     ),
                     "val/note_f1": note_f1,
+                    "val/note_onset_f1": metrics["onset_f1"],
+                    "val/note_f1_fixed": metrics["note_f1"],
                     "lr": record["lr"],
                 }
             )
@@ -242,7 +299,7 @@ def train_model(
                     "epoch": epoch,
                     "val_note_f1": note_f1,
                     "config": {
-                        "onset_thresh": ONSET_THRESH,
+                        "onset_thresh": metrics["best_onset_thresh"],
                         "frame_thresh": FRAME_THRESH,
                         "epochs": args.epochs,
                     },
@@ -254,6 +311,14 @@ def train_model(
             if stale >= PATIENCE:
                 print(f"[{name}] early stop at epoch {epoch} (best {best_epoch})")
                 break
+
+    onset_thresh, frame_thresh, val_offset_f1 = tune_thresholds(
+        checkpoint_path, val_tracks, device
+    )
+    print(
+        f"[{name}] tuned thresholds onset={onset_thresh:.2f} frame={frame_thresh:.2f} "
+        f"(val onset+offset F1 {val_offset_f1:.3f})"
+    )
 
     if run is not None:
         run.finish()

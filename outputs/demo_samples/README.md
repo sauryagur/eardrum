@@ -1,6 +1,6 @@
 # Demo excerpts
 
-20-second excerpts of two MAESTRO v3.0.0 test tracks (20 s),
+20-second excerpts of two MAESTRO v3.0.0 test tracks,
 16 kHz mono WAV.
 
 Source: MAESTRO v3.0.0, Magenta / Google.
