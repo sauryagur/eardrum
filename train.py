@@ -23,7 +23,7 @@ from eardrum.decode import decode_notes, predict_probabilities  # noqa: E402
 from eardrum.metrics import frame_counts, micro_note_scores, prf  # noqa: E402
 from eardrum.model import build_model, count_parameters  # noqa: E402
 
-WANDB_PROJECT = "audio-to-midi-transcription"
+WANDB_PROJECT = "eardrum"
 DEFAULT_EPOCHS = 25
 BATCH_SIZE = 16
 LR = 1e-3
