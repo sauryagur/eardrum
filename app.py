@@ -1,227 +1,143 @@
-"""Gradio demo: upload piano audio, get a piano roll, synth playback, and MIDI."""
+"""
+Web demo: upload a piano recording, get a piano roll, a MIDI file and a
+quick sine-wave rendition of the transcription to compare by ear.
 
+Runs on CPU. The checkpoint is found in this order:
+  1. the AMT_CKPT environment variable (a local path),
+  2. models/run4_best.pt,
+  3. downloaded once from the GitHub release (AMT_CKPT_URL) into ~/.cache/amt/.
+
+  pip install -e ".[train,demo]"
+  python app.py                      # then open http://127.0.0.1:7860
+"""
 from __future__ import annotations
 
-import argparse
-import json
 import os
 import tempfile
+import time
+import urllib.request
 from pathlib import Path
 
-import matplotlib
+import librosa
 import numpy as np
-import torch
+import pretty_midi
+from matplotlib.figure import Figure
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
+from amt.inference import default_thresholds, load_checkpoint, notes_to_midi, transcribe_audio
 
-from eardrum import constants as C  # noqa: E402
-from eardrum.dataset import load_audio, log_mel  # noqa: E402
-from eardrum.decode import (  # noqa: E402
-    decode_notes,
-    load_model,
-    notes_to_midi,
-    predict_probabilities,
-)
+RELEASE_URL = "https://github.com/gityag/Automated-Music-Transcription/releases/download/v1.0/run4_best.pt"
+MAX_SECONDS = float(os.environ.get("AMT_MAX_SECONDS", 600))   # keep CPU time bounded on a shared host
+PREVIEW_SR = 16000
 
-MAX_PLOT_SECONDS = 30.0
-C_OCTAVES = [(key, C.PITCH_MIN + key) for key in range(3, C.N_PITCHES, 12)]
+_MODEL = None
 
 
-def header_markdown(metrics_path: Path) -> str:
-    base = (
-        "# Eardrum — polyphonic piano transcription\n"
-        "Dual-head CRNN (onsets & frames) trained on a small MAESTRO subset. "
-        "Upload or record piano audio, then adjust the two thresholds."
-    )
-    if not metrics_path.exists():
-        return base + "\n\n_Test metrics not generated (`python evaluate.py`)._"
-    try:
-        entry = json.loads(metrics_path.read_text())["models"]["dual"]["note"]
-    except (KeyError, json.JSONDecodeError):
-        return base + "\n\n_Test metrics file is unreadable._"
-    return base + (
-        "\n\n**Test-set note scores:** "
-        f"onset F1 {entry['onset_f1']:.3f} · "
-        f"onset+offset F1 {entry['note_f1_offset']:.3f}. "
-        "Two held-out tracks — a scaled-down ablation, not SOTA."
-    )
+def checkpoint_path() -> Path:
+    if os.environ.get("AMT_CKPT"):
+        return Path(os.environ["AMT_CKPT"])
+    local = Path(__file__).resolve().parent / "models" / "run4_best.pt"
+    if local.exists():
+        return local
+    cached = Path.home() / ".cache" / "amt" / "run4_best.pt"
+    if not cached.exists():
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        url = os.environ.get("AMT_CKPT_URL", RELEASE_URL)
+        print(f"downloading checkpoint from {url}")
+        tmp = cached.with_suffix(".part")
+        urllib.request.urlretrieve(url, tmp)
+        tmp.replace(cached)
+    return cached
 
 
-def piano_roll_figure(
-    audio: np.ndarray, frame_probs: np.ndarray, frame_thresh: float
-) -> plt.Figure:
-    max_frames = min(frame_probs.shape[1], int(MAX_PLOT_SECONDS * C.FRAME_RATE))
-    samples = min(len(audio), int(MAX_PLOT_SECONDS * C.SAMPLE_RATE))
-    mel = log_mel(audio[:samples])
-    mel_seconds = mel.shape[1] / C.FRAME_RATE
-    roll_seconds = max_frames / C.FRAME_RATE
-    seconds = min(mel_seconds, roll_seconds, MAX_PLOT_SECONDS)
+def get_model():
+    global _MODEL
+    if _MODEL is None:
+        _MODEL = load_checkpoint(checkpoint_path(), device="cpu")
+    return _MODEL
 
-    fig, axes = plt.subplots(
-        2, 1, figsize=(12, 7), gridspec_kw={"height_ratios": [1, 1.2]}
-    )
-    axes[0].imshow(
-        mel,
-        origin="lower",
-        aspect="auto",
-        cmap="magma",
-        extent=[0, mel_seconds, 0, C.N_MELS],
-    )
-    axes[0].set_ylabel("mel bin")
-    axes[0].set_title("Log-mel spectrogram")
-    axes[0].set_xlim(0, seconds)
 
-    active = (frame_probs[:, :max_frames] >= frame_thresh).astype(float)
-    axes[1].imshow(
-        active,
-        origin="lower",
-        aspect="auto",
-        cmap="gray_r",
-        extent=[0, roll_seconds, -0.5, C.N_PITCHES - 0.5],
-    )
-    axes[1].set_yticks([key for key, _ in C_OCTAVES])
-    axes[1].set_yticklabels([f"C{(pitch - 12) // 12}" for _, pitch in C_OCTAVES])
-    axes[1].set_ylabel("pitch")
-    axes[1].set_xlabel("seconds")
-    axes[1].set_title(f"Transcribed piano roll (frame threshold {frame_thresh:.2f})")
-    axes[1].set_xlim(0, seconds)
-
+def piano_roll_figure(notes, duration: float) -> Figure:
+    fig = Figure(figsize=(10, 4), dpi=110)
+    ax = fig.add_subplot()
+    for n in notes:
+        ax.barh(n.pitch, n.end - n.start, left=n.start, height=0.8, color="#2a78d6", linewidth=0)
+    pitches = [n.pitch for n in notes] or [60]
+    lo, hi = max(21, min(pitches) - 3), min(108, max(pitches) + 3)
+    cs = [p for p in range(lo, hi + 1) if p % 12 == 0]
+    ax.set_yticks(cs, [pretty_midi.note_number_to_name(p) for p in cs])
+    ax.set_ylim(lo - 0.5, hi + 0.5)
+    ax.set_xlim(0, max(duration, 1e-3))
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Pitch")
+    ax.set_axisbelow(True)
+    ax.grid(axis="y", color="#e4e4e0", linewidth=0.6)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
     fig.tight_layout()
     return fig
 
 
-def synth_playback(midi) -> tuple[int, np.ndarray] | None:
-    if not any(instrument.notes for instrument in midi.instruments):
-        return None
-    waveform = midi.synthesize(fs=C.SAMPLE_RATE)
-    if waveform.size == 0:
-        return None
-    peak = float(np.max(np.abs(waveform))) or 1.0
-    pcm = np.clip(waveform / peak, -1.0, 1.0)
-    return C.SAMPLE_RATE, (pcm * 32767).astype(np.int16)
+def sine_preview(notes) -> np.ndarray:
+    pm = pretty_midi.PrettyMIDI()
+    inst = pretty_midi.Instrument(program=0)
+    inst.notes = [pretty_midi.Note(velocity=90, pitch=n.pitch, start=n.start, end=n.end) for n in notes]
+    pm.instruments.append(inst)
+    y = pm.synthesize(fs=PREVIEW_SR) if notes else np.zeros(PREVIEW_SR, dtype=np.float64)
+    peak = np.max(np.abs(y)) or 1.0
+    return (0.8 * y / peak).astype(np.float32)
 
 
-def transcribe(audio_path, onset_thresh, frame_thresh):
-    import gradio as gr
-
+def transcribe(audio_path, onset_thr: float, frame_thr: float):
     if not audio_path:
-        raise gr.Error("Provide an audio file or record from the microphone.")
-    try:
-        audio = load_audio(audio_path)
-    except Exception as exc:
-        raise gr.Error(f"Could not read audio: {exc}") from exc
-    if len(audio) < C.SAMPLE_RATE // 10:
-        raise gr.Error("Audio is too short; provide at least 0.1 s.")
+        raise ValueError("Upload or record some piano audio first.")
+    model, cfg, device = get_model()
+    sr = cfg.audio.sample_rate
+    audio, _ = librosa.load(audio_path, sr=sr, mono=True, duration=MAX_SECONDS)
+    duration = len(audio) / sr
+    t0 = time.perf_counter()
+    notes = transcribe_audio(audio, sr, model, cfg, device=device,
+                             onset_thr=onset_thr, frame_thr=frame_thr)
+    secs = time.perf_counter() - t0
 
-    probs = predict_probabilities(MODEL, audio, device=DEVICE)
-    notes = decode_notes(
-        probs["frame"],
-        probs["onset"],
-        onset_thresh=float(onset_thresh),
-        frame_thresh=float(frame_thresh),
-    )
-    midi = notes_to_midi(notes, duration=len(audio) / C.SAMPLE_RATE)
+    out_dir = Path(tempfile.mkdtemp(prefix="amt_"))
+    midi_path = out_dir / (Path(audio_path).stem + "_transcribed.mid")
+    notes_to_midi(notes, midi_path)
 
-    figure = piano_roll_figure(audio, probs["frame"], float(frame_thresh))
-    playback = synth_playback(midi)
-
-    midi_path = tempfile.NamedTemporaryFile(suffix=".mid", delete=False).name
-    midi.write(midi_path)
-
-    if notes:
-        durations = [end - start for _, start, end, _ in notes]
-        summary = (
-            f"**{len(notes)} notes** · mean duration {np.mean(durations):.2f} s · "
-            f"pitch range {min(n[0] for n in notes)}–{max(n[0] for n in notes)}"
-        )
-    else:
-        summary = (
-            "**No notes detected.** Lower the frame or onset threshold, "
-            "or use a cleaner piano recording."
-        )
-    return figure, playback, midi_path, summary
+    clipped = " (only the first %d s were transcribed)" % MAX_SECONDS if duration >= MAX_SECONDS - 0.01 else ""
+    summary = (f"{len(notes)} notes in {duration:.1f} s of audio{clipped}. "
+               f"Transcribed in {secs:.2f} s on CPU ({duration / max(secs, 1e-6):.0f}x real time).")
+    return piano_roll_figure(notes, duration), str(midi_path), (PREVIEW_SR, sine_preview(notes)), summary
 
 
-def build_demo(
-    metrics_path: Path,
-    onset_default: float = 0.45,
-    frame_default: float = 0.40,
-):
+def build_ui():
     import gradio as gr
 
-    examples = sorted(str(path) for path in Path("outputs/demo_samples").glob("*.wav"))
-    with gr.Blocks(title="Eardrum — piano transcription") as demo:
-        gr.Markdown(header_markdown(metrics_path))
+    model, _, _ = get_model()
+    thr = default_thresholds(model)
+    with gr.Blocks(title="Piano transcription") as demo:
+        gr.Markdown(
+            "# Piano audio to MIDI\n"
+            "A 3.8M-parameter CNN with a per-pitch GRU, trained on MAESTRO v3. Upload a solo piano "
+            "recording (WAV, MP3, FLAC); you get a piano roll, a MIDI file and a plain sine-wave "
+            "rendition of the notes to compare by ear. Works best on clean solo piano.")
         with gr.Row():
-            with gr.Column():
-                audio = gr.Audio(
-                    sources=["upload", "microphone"],
-                    type="filepath",
-                    label="Piano audio",
-                )
-                onset = gr.Slider(
-                    0.1,
-                    0.9,
-                    value=onset_default,
-                    step=0.05,
-                    label="Onset sensitivity threshold",
-                )
-                frame = gr.Slider(
-                    0.1,
-                    0.9,
-                    value=frame_default,
-                    step=0.05,
-                    label="Frame sustain threshold",
-                )
-                button = gr.Button("Transcribe", variant="primary")
-            with gr.Column():
-                plot = gr.Plot(label="Spectrogram and piano roll")
-                playback = gr.Audio(label="Synthesized transcription", type="numpy")
-                midi_file = gr.File(label="Download MIDI")
+            with gr.Column(scale=1):
+                audio = gr.Audio(sources=["upload", "microphone"], type="filepath", label="Piano recording")
+                with gr.Accordion("Decoding thresholds", open=False):
+                    onset = gr.Slider(0.05, 0.95, value=thr["onset_thr"], step=0.05,
+                                      label="Onset threshold (higher = fewer, surer notes)")
+                    frame = gr.Slider(0.05, 0.95, value=thr["frame_thr"], step=0.05,
+                                      label="Frame threshold (higher = shorter notes)")
+                run = gr.Button("Transcribe", variant="primary")
+            with gr.Column(scale=2):
                 summary = gr.Markdown()
-        if examples:
-            gr.Examples(examples=examples, inputs=audio)
-        button.click(
-            transcribe,
-            inputs=[audio, onset, frame],
-            outputs=[plot, playback, midi_file, summary],
-        )
+                roll = gr.Plot(label="Piano roll")
+                with gr.Row():
+                    midi = gr.File(label="MIDI file")
+                    preview = gr.Audio(label="Transcription, sine-wave rendition", type="numpy")
+        run.click(transcribe, [audio, onset, frame], [roll, midi, preview, summary])
     return demo
 
 
-def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", default="outputs/dual_best.pt")
-    parser.add_argument("--metrics", default="outputs/metrics.json")
-    parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--share", action="store_true")
-    args = parser.parse_args(argv)
-
-    global MODEL, DEVICE
-    checkpoint = Path(args.checkpoint)
-    if not checkpoint.exists():
-        raise SystemExit(
-            f"checkpoint not found: {checkpoint}. Run train.py first or pass --checkpoint."
-        )
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    MODEL, config = load_model(checkpoint, DEVICE)
-
-    demo = build_demo(
-        Path(args.metrics),
-        onset_default=float(config.get("onset_thresh", 0.45)),
-        frame_default=float(config.get("frame_thresh", 0.40)),
-    )
-    demo.launch(
-        server_name=os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1"),
-        server_port=args.port,
-        share=args.share,
-    )
-
-
-MODEL = None
-DEVICE = "cpu"
-
-
 if __name__ == "__main__":
-    main()
+    build_ui().launch()

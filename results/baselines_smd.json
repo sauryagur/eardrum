@@ -1,0 +1,36 @@
+{
+  "n_songs": 50,
+  "spectral_threshold_db": -40.0,
+  "silence": {
+    "frame": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0
+    },
+    "note": {
+      "onset_precision": 0.0,
+      "onset_recall": 0.0,
+      "onset_f1": 0.0,
+      "onset_offset_precision": 0.0,
+      "onset_offset_recall": 0.0,
+      "onset_offset_f1": 0.0
+    },
+    "n_songs_scored_for_notes": 50
+  },
+  "spectral_peak": {
+    "frame": {
+      "precision": 0.10185205288825205,
+      "recall": 0.9463113277349814,
+      "f1": 0.18019020399505628
+    },
+    "note": {
+      "onset_precision": 0.017578330037305922,
+      "onset_recall": 0.20005007033093083,
+      "onset_f1": 0.03203825206745488,
+      "onset_offset_precision": 0.0023315397578567544,
+      "onset_offset_recall": 0.027618578803940363,
+      "onset_offset_f1": 0.004263613561992075
+    },
+    "n_songs_scored_for_notes": 50
+  }
+}
