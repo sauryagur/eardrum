@@ -17,9 +17,15 @@ on the chosen checkpoint, by scripts/evaluate_model.py.
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import asdict
 from pathlib import Path
+
+try:
+    import wandb
+except ImportError:  # optional dependency: `pip install -e ".[wandb]"`
+    wandb = None
 
 import numpy as np
 import torch
@@ -113,6 +119,9 @@ def train(
     steps_per_epoch: int | None = None,
     resume: bool = True,
     log=print,
+    use_wandb: bool = False,
+    wandb_project: str = "amt",
+    wandb_run_name: str | None = None,
 ) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -131,6 +140,16 @@ def train(
     mean, std = compute_norm_stats(train_pieces)
     model.set_norm(mean, std)
     model.to(device)
+
+    wb_run = None
+    if use_wandb:
+        if wandb is None:
+            raise ImportError("wandb is not installed; install with `pip install -e '.[wandb]'`")
+        # Offline by default: no account/key means no interactive login prompt.
+        if not os.environ.get("WANDB_API_KEY"):
+            os.environ.setdefault("WANDB_MODE", "offline")
+        wb_run = wandb.init(project=wandb_project, name=wandb_run_name,
+                           config=asdict(cfg), reinit=True)
 
     opt = torch.optim.Adam(model.parameters(), lr=tc.learning_rate)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=total_steps, eta_min=tc.learning_rate * 0.05)
@@ -183,6 +202,8 @@ def train(
                "select_metric": val["select_metric"],
                "seconds": time.time() - t0, "lr": sched.get_last_lr()[0]}
         history.append(row)
+        if wb_run is not None:
+            wb_run.log(row, step=epoch + 1)
         note_txt = (f"  note F1 {val['note_onset_f1']:.3f} on+off {val['note_onset_offset_f1']:.3f}"
                     if "note_onset_f1" in val else "")
         log(f"epoch {epoch+1}/{epochs}  loss {row['train_loss']:.4f}  val P {val['precision']:.3f} "
@@ -198,5 +219,7 @@ def train(
                     "config": asdict(cfg)}, last_path)
         (out_dir / "history.json").write_text(json.dumps(history, indent=1))
 
+    if wb_run is not None:
+        wb_run.finish()
     # best_val_f1 = best value of the selection metric (see evaluate_val)
     return {"best_val_f1": best_f1, "history": history}

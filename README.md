@@ -175,6 +175,11 @@ Training (each run is one config; run4 = `configs/hd_gru.yaml`):
 python scripts/train.py --cache data/processed/maestro --out runs/run4 --config configs/hd_gru.yaml --epochs 10
 ```
 
+Add `--wandb` to log each epoch to Weights & Biases (install with
+`pip install -e ".[wandb]"`). Runs are offline unless `WANDB_API_KEY` is set;
+`WANDB_MODE=disabled` turns logging off. `--wandb-project` and
+`--wandb-run-name` override the defaults (`amt` and an auto-generated name).
+
 | Run | Config |
 |---|---|
 | run2 | `configs/onset.yaml` (seed repeat: `--seed 22`) |

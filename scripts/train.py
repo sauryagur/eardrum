@@ -31,6 +31,9 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=None)
     ap.add_argument("--steps-per-epoch", type=int, default=None)
     ap.add_argument("--no-resume", action="store_true")
+    ap.add_argument("--wandb", action="store_true", help="log the run to Weights & Biases")
+    ap.add_argument("--wandb-project", default="amt", help="W&B project name")
+    ap.add_argument("--wandb-run-name", default=None, help="W&B run name")
     ap.add_argument("--seed", type=int, default=None,
                     help="override train.seed (e.g. a seed repeat); the validation subset does not change")
     args = ap.parse_args()
@@ -51,7 +54,9 @@ def main() -> None:
           f"{len(val_pieces)} val pieces ({total_hours(val_pieces, fs):.1f} h)")
 
     train(cfg, train_pieces, val_pieces, args.out, epochs=args.epochs,
-          steps_per_epoch=args.steps_per_epoch, resume=not args.no_resume)
+          steps_per_epoch=args.steps_per_epoch, resume=not args.no_resume,
+          use_wandb=args.wandb, wandb_project=args.wandb_project,
+          wandb_run_name=args.wandb_run_name)
 
 
 if __name__ == "__main__":

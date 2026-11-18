@@ -134,6 +134,11 @@ Model variants and reported runs:
   tuning happens later, on the chosen checkpoint, and never on test.
 - Training resumes from `last.pt` unless `--no-resume`; checkpoints carry their
   `config`, epoch and model.
+- Optional W&B logging (`--wandb`, extra `wandb`): `wandb.init` receives the
+  full `Config` and project/run name, then each epoch's row (loss, val frame
+  P/R/F1, note F1, selection metric, seconds, lr) is logged with the epoch as
+  step. Without `WANDB_API_KEY` the mode defaults to `offline`; `WANDB_MODE`
+  is respected. No W&B dependency or network access is needed when off.
 
 Reported runs use 10 epochs on 962 MAESTRO pieces (~8770 steps) on one T4.
 

@@ -264,3 +264,39 @@ def test_harmonic_model_shapes_and_config():
     f, o = m(torch.randn(2, 88, 40))
     assert f.shape == (2, 88, 40) and o.shape == (2, 88, 40)
     assert build_model(Config()).harmonic is None     # off by default: old checkpoints load
+
+
+def test_wandb_logging_is_optional_and_logs_each_epoch(tmp_path, monkeypatch):
+    import types
+
+    import amt.training.loop as loop
+
+    class FakeRun:
+        def __init__(self):
+            self.logged = []
+            self.finished = False
+
+        def log(self, row, step=None):
+            self.logged.append((step, row["epoch"]))
+
+        def finish(self):
+            self.finished = True
+
+    run = FakeRun()
+    init_kwargs = {}
+    monkeypatch.setattr(loop, "wandb", types.SimpleNamespace(
+        init=lambda **kw: (init_kwargs.update(kw), run)[1]))
+    monkeypatch.setenv("WANDB_API_KEY", "test-key")
+
+    cfg = Config()
+    cfg.model.conv_channels = [4, 4]
+    cfg.train.batch_size = 4
+    cfg.train.segment_frames = 64
+    cfg.train.device = "cpu"
+    piece = _synthetic_piece(seed=1)
+    train(cfg, [piece], [_synthetic_piece(seed=2)], tmp_path, epochs=2,
+          steps_per_epoch=3, log=lambda *_: None, use_wandb=True,
+          wandb_project="test-project", wandb_run_name="test-run")
+
+    assert init_kwargs["project"] == "test-project" and init_kwargs["name"] == "test-run"
+    assert run.logged == [(1, 1), (2, 2)] and run.finished
